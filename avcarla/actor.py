@@ -438,9 +438,10 @@ class CarlaMobileActor(CarlaActor):
 
     def _tick(self):
         data = self.sensor_data_manager.pop()
-        ctrl = self.pipeline(data)
+        ctrl = self.pipeline(data, self.get_object_state())
         if not self.autopilot:
             self.apply_control(ctrl)
+        return ctrl
 
     def get_pose(self):
         tf = self.actor.get_transform()
@@ -452,11 +453,16 @@ class CarlaMobileActor(CarlaActor):
         att = Attitude(q, GlobalOrigin3D)
         return Pose(pos, att)
 
-    # def apply_control(self, ctrl):
-    #     VC = carla.VehicleControl(
-    #         ctrl.throttle, ctrl.steer, ctrl.brake, ctrl.hand_brake, ctrl.reverse
-    #     )
-    #     self.actor.apply_control(VC)
+    def apply_control(self, ctrl):
+        self.actor.apply_control(
+            carla.VehicleControl(
+                throttle=float(ctrl.throttle),
+                steer=float(ctrl.steer),
+                brake=float(ctrl.brake),
+                hand_brake=bool(getattr(ctrl, "hand_brake", False)),
+                reverse=bool(getattr(ctrl, "reverse", False)),
+            )
+        )
 
     # def set_control_mode(self, mode):
     #     assert mode in ["autopilot", "manual"]
