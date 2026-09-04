@@ -1,6 +1,8 @@
 import random
 from typing import TYPE_CHECKING, List, Union
 
+import carla
+
 
 if TYPE_CHECKING:
     from .client import CarlaClient
