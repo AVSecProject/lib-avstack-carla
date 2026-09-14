@@ -29,10 +29,15 @@ from .config import CARLA
 from .geometry import CarlaReferenceFrame, carla_transform_to_pose
 
 
-def parse_vehicle_blueprint(vehicle: Union[str, int], vehicle_bps):
+def parse_vehicle_blueprint(vehicle: Union[str, int], vehicle_bps, rng=None):
     if isinstance(vehicle, str):
         if vehicle in ["random", "randint", "vehicle", "random-vehicle"]:
-            bp = random.choice(vehicle_bps)
+            candidates = sorted(vehicle_bps, key=lambda bp: bp.id)
+            bp = (
+                candidates[int(rng.randint(len(candidates)))]
+                if rng is not None
+                else random.choice(candidates)
+            )
         else:
             try:
                 bp = vehicle_bps.filter(vehicle)[0]
@@ -50,12 +55,25 @@ def parse_spawn(
     spawn_points: List,
     spawns_chosen: List[int],
     reference_to_spawn: ConfigDict,
+    rng=None,
+    spawn_transform=None,
 ):
+    if spawn_transform is not None:
+        # A recorded transform is already in CARLA world coordinates and includes
+        # reference_to_spawn. Do not convert coordinates or apply the offset again.
+        return carla.Transform(
+            carla.Location(**spawn_transform["location"]),
+            carla.Rotation(**spawn_transform["rotation"]),
+        )
     # parse the original spawn point
     if isinstance(spawn, str):
         if spawn in ["random", "randint"]:
             while True:
-                tf = random.choice(spawn_points)
+                tf = (
+                    spawn_points[int(rng.randint(len(spawn_points)))]
+                    if rng is not None
+                    else random.choice(spawn_points)
+                )
                 if tf not in spawns_chosen:
                     spawns_chosen.append(tf)
                     break
@@ -87,12 +105,18 @@ def parse_destination(
     destination: Union[ConfigDict, str, int],
     spawn_points: List,
     reference: Union[CarlaReferenceFrame, None] = None,
+    rng=None,
 ):
     if destination is None:
         dest = None
     elif isinstance(destination, str):
         if destination in ["random", "randint"]:
-            dest = random.choice(spawn_points)
+            dest = (
+                spawn_points[int(rng.randint(len(spawn_points)))]
+                if rng is not None
+                else random.choice(spawn_points)
+            )
+            dest = carla_location_to_numpy_vector(dest.location)
         else:
             raise NotImplementedError(destination)
     elif isinstance(destination, int):
@@ -114,7 +138,13 @@ def parse_destination(
     return dest
 
 
-def try_spawn_actor(world, bp, tf):
+def try_spawn_actor(world, bp, tf, strict=False):
+    if strict:
+        actor = world.try_spawn_actor(bp, tf)
+        if actor is None:
+            raise RuntimeError(f"Could not spawn {bp.id} at configured transform {tf}")
+        return actor
+
     n_att = 10
     d_inc = 3
     i = 0
@@ -186,11 +216,6 @@ class CarlaObject(BaseModule):
         self.reference_to_spawn = reference_to_spawn
 
     def destroy(self):
-        if self.actor is not None:
-            try:
-                self.actor.destroy()
-            except RuntimeError as e:
-                pass  # usually because already destroyed
         try:
             for s_name, sensor in self.sensors.items():
                 try:
@@ -199,6 +224,11 @@ class CarlaObject(BaseModule):
                     print(f"Could not destroy sensor {s_name}...continuing")
         except AttributeError:
             pass
+        if self.actor is not None:
+            try:
+                self.actor.destroy()
+            except RuntimeError as e:
+                pass  # usually because already destroyed
 
     def encode(self):
         return self.get_object_state().encode()
@@ -225,6 +255,7 @@ class CarlaNpc(CarlaObject):
         client: "CarlaClient",
         npc_type: str = "random",
         reference_to_spawn: ConfigDict = {"type": "CarlaReferenceFrame"},
+        spawn_transform: dict = None,
         *args,
         **kwargs,
     ):
@@ -232,17 +263,28 @@ class CarlaNpc(CarlaObject):
         name = f"npc-{self.ID_npc_global}"
         if ("vehicle" in npc_type) or (npc_type == "random"):
             vehicle_bps = client.world.get_blueprint_library().filter("vehicle")
-            bp = parse_vehicle_blueprint(npc_type, vehicle_bps)
+            bp = parse_vehicle_blueprint(npc_type, vehicle_bps, rng=client.rng)
         else:
             raise NotImplementedError(npc_type)
         tf = parse_spawn(
             spawn=spawn,
             spawn_points=client.spawn_points,
             spawns_chosen=client.spawns_chosen,
+            rng=client.rng,
             reference_to_spawn=reference_to_spawn,
+            spawn_transform=spawn_transform,
         )
-        self.actor = try_spawn_actor(client.world, bp, tf)
-        self.actor.set_autopilot(True)
+        self.actor = try_spawn_actor(
+            client.world,
+            bp,
+            tf,
+            strict=client.strict_spawn or spawn_transform is not None,
+        )
+        # get_transform() reads the last tick's cache, which may still be empty.
+        # Keep the successful request, including any displacement made by retries.
+        self.spawn_transform = tf
+        self.traffic_manager_port = client.traffic_manager_port
+        self.actor.set_autopilot(True, client.traffic_manager_port)
         super().__init__(
             name=name,
             spawn=spawn,
@@ -255,6 +297,11 @@ class CarlaNpc(CarlaObject):
     @property
     def ID(self):
         return self.ID_npc_global
+
+    def destroy(self):
+        if self.actor.is_alive:
+            self.actor.set_autopilot(False, self.traffic_manager_port)
+        super().destroy()
 
     def initialize(self, t0, frame0):
         self.t0 = t0
@@ -357,6 +404,7 @@ class CarlaStaticActor(CarlaActor):
             spawn=spawn,
             spawn_points=client.spawn_points,
             spawns_chosen=client.spawns_chosen,
+            rng=client.rng,
             reference_to_spawn=reference_to_spawn,
         )
         super().__init__(
@@ -390,26 +438,42 @@ class CarlaMobileActor(CarlaActor):
         destination: Union[ConfigDict, str, int, None],
         client: "CarlaClient",
         reference_to_spawn: ConfigDict = {"type": "CarlaReferenceFrame"},
+        spawn_transform: dict = None,
     ) -> None:
         """Initialize the vehicle and attach sensors to it"""
 
         self.vehicle_bps = client.world.get_blueprint_library().filter("vehicle")
-        bp = parse_vehicle_blueprint(vehicle=vehicle, vehicle_bps=self.vehicle_bps)
+        bp = parse_vehicle_blueprint(
+            vehicle=vehicle, vehicle_bps=self.vehicle_bps, rng=client.rng
+        )
         tf = parse_spawn(
             spawn=spawn,
             spawn_points=client.spawn_points,
             spawns_chosen=client.spawns_chosen,
+            rng=client.rng,
             reference_to_spawn=reference_to_spawn,
+            spawn_transform=spawn_transform,
         )
-        self.actor = try_spawn_actor(client.world, bp, tf)
+        self.actor = try_spawn_actor(
+            client.world,
+            bp,
+            tf,
+            strict=client.strict_spawn or spawn_transform is not None,
+        )
+        # Preserve the successful request before the first world tick updates actor state.
+        self.spawn_transform = tf
 
-        super().__init__(
-            spawn=spawn,
-            reference_to_spawn=reference_to_spawn,
-            pipeline=pipeline,
-            sensors=sensors,
-            client=client,
-        )
+        try:
+            super().__init__(
+                spawn=spawn,
+                reference_to_spawn=reference_to_spawn,
+                pipeline=pipeline,
+                sensors=sensors,
+                client=client,
+            )
+        except BaseException:
+            self.destroy()
+            raise
 
         try:
             # provide initialization
@@ -421,6 +485,7 @@ class CarlaMobileActor(CarlaActor):
                 destination=destination,
                 spawn_points=client.spawn_points,
                 reference=ego_init.reference,
+                rng=client.rng,
             )
             self.pipeline.initialize(
                 self.timestamp,
@@ -431,7 +496,7 @@ class CarlaMobileActor(CarlaActor):
             self.autopilot = autopilot
             if self.autopilot:
                 print("Enabling ego autopilot")
-                self.actor.set_autopilot(True)
+                self.actor.set_autopilot(True, client.traffic_manager_port)
         except (KeyboardInterrupt, Exception) as e:
             self.destroy()
             raise e

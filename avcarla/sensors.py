@@ -105,6 +105,8 @@ class CarlaSensor(BaseModule):
 
     def destroy(self):
         if self.object is not None:
+            if self.object.is_listening:
+                self.object.stop()
             self.object.destroy()
 
     def _on_sensor_event(weak_self):
@@ -476,6 +478,7 @@ class CarlaLidar(CarlaSensor):
         lower_fov: float = -17.6,
         horizontal_fov: float = 360.0,
         noise: dict = {},
+        noise_seed: int = None,
         reference: ConfigDict = {
             "type": "CarlaReferenceFrame",
             "location": [0, 0, 1.6],
@@ -495,6 +498,8 @@ class CarlaLidar(CarlaSensor):
             "horizontal_fov": horizontal_fov,
             "sensor_tick": sensor_tick,
         }
+        if noise_seed is not None:
+            attributes["noise_seed"] = noise_seed
         super().__init__(
             name=name,
             attributes=attributes,
