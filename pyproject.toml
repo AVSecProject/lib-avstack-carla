@@ -16,7 +16,7 @@ packages = [{include = "avcarla"}]
 
 [tool.poetry.dependencies]
 python = "~3.11"
-numpy = ">=2,<3"
+numpy = ">=1.26,<2"
 numpy-quaternion = ">=2024.0"
 lib-avstack-core = { path = "../lib-avstack-core", develop = true }
 lib-avstack-api = { path = "../lib-avstack-api", develop = true }
