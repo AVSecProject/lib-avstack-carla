@@ -15,9 +15,9 @@ classifiers = [
 packages = [{include = "avcarla"}]
 
 [tool.poetry.dependencies]
-python = "~3.10"
-numpy = ">=1.20, <1.26"
-numpy-quaternion = "^2022.4"
+python = "~3.11"
+numpy = ">=2,<3"
+numpy-quaternion = ">=2024.0"
 lib-avstack-core = { path = "../lib-avstack-core", develop = true }
 lib-avstack-api = { path = "../lib-avstack-api", develop = true }
 
